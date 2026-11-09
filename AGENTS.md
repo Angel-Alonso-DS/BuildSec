@@ -19,12 +19,13 @@ Construir un MVP que genere APIs REST pequeñas desde requisitos, las valide med
 Inspeccionar -> plan mínimo -> cambios -> tests -> revisar diff -> resumen (archivos, tests, riesgos y siguiente paso). Si hay bloqueo, emitir una descripción concreta.
 
 ## Cierre
-Sin merge automático. Reportar comando exacto, exit code, paths de evidencia y riesgos residuales. No inferir certificación ISO.
+El agente nunca crea ni fusiona PR. Reportar comando exacto, exit code, paths de evidencia y riesgos residuales. No inferir certificación ISO.
 
 ## Arquitectura y skill obligatoria
 - Monolith-first: una sola aplicación modular salvo justificación técnica documentada. Los agentes son módulos, no microservicios por defecto.
 - Antes de cualquier operación Git leer `.agents/skills/git-governance/SKILL.md`. Esa skill prevalece sobre ejemplos antiguos del kit.
 - `main` y `dev` están protegidas; todas las tareas nacen de `dev` con `feature/*` o `bugfix/*`.
 - No realizar operaciones sobre `main` con agentes. El humano coordina releases fuera del protocolo del agente.
-- `git push` normal y creación de PR pueden hacerse sin aprobación, conforme a la matriz de la skill. `Squash and merge` a `dev` requiere autorización humana explícita por PR.
+- El agente puede crear ramas, implementar, probar, hacer commits y publicar ramas conforme a la skill. Nunca crea ni fusiona PR; el desarrollador humano crea, revisa y fusiona los PR.
+- Tras publicar una rama, entregar un reporte de commits, archivos modificados, pruebas, riesgos pendientes y enlace para crear el PR manualmente; detenerse y esperar una nueva tarea.
 - No ejecutar un loop automático que realice cambios Git sin respetar la skill. El runner incluido NO hace commits, pushes ni merges.
