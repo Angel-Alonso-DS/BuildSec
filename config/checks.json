@@ -1,0 +1,28 @@
+{
+  "checks": [
+    {
+      "name": "python-tests",
+      "argv": [
+        "python",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests",
+        "-v"
+      ],
+      "timeout_seconds": 120,
+      "required": true
+    },
+    {
+      "name": "diff-whitespace",
+      "argv": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "timeout_seconds": 30,
+      "required": true
+    }
+  ]
+}

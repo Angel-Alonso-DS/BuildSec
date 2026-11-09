@@ -1,0 +1,4 @@
+# Sustituir estos aliases de EJEMPLO por usuarios reales de GitHub antes de habilitar CODEOWNERS.
+# /src/core/ @equipo-a
+# /src/security/ @equipo-b
+# /CONTRACTS.md @equipo-a @equipo-b
