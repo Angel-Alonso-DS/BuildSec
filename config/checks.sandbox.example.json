@@ -1,0 +1,18 @@
+{
+  "checks": [
+    {
+      "name": "generated-python-tests-inside-docker",
+      "argv": [
+        "docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop=ALL",
+        "--security-opt", "no-new-privileges", "--pids-limit", "128",
+        "--memory", "512m", "--cpus", "1",
+        "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+        "-e", "PYTHONDONTWRITEBYTECODE=1",
+        "-v", "./:/workspace:ro", "-w", "/workspace",
+        "python:3.11-slim", "python", "-m", "unittest", "discover", "-s", "tests", "-v"
+      ],
+      "timeout_seconds": 120,
+      "required": true
+    }
+  ]
+}

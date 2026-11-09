@@ -1,0 +1,7 @@
+# Agregar al .gitignore existente (no reemplazar)
+.buildsys-runs/
+.env
+.env.*
+!.env.example
+__pycache__/
+.pytest_cache/
