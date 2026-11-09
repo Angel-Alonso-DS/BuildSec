@@ -1,0 +1,7 @@
+.buildsys-runs/
+.env
+.env.*
+!.env.example
+__pycache__/
+.pytest_cache/
+/secrets/
