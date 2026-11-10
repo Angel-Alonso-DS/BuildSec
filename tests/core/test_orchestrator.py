@@ -1,4 +1,5 @@
 import time
+import threading
 import unittest
 
 from src.core.models import Execution, Goal, State, ValidationResult
@@ -76,6 +77,20 @@ class OrchestratorTests(unittest.TestCase):
         run = Orchestrator(self.generator, Validator(["passed"]), self.evidence, SlowMemory(), timeout_seconds=0.01)
         result = run.run(self.goal, "fake", "abc")
         self.assertEqual((result.state, result.error), (State.BLOCKED, "timeout"))
+
+    def test_timed_out_adapter_calls_remain_capacity_bounded(self):
+        release = threading.Event()
+        class BlockedMemory(Memory):
+            def find(self, goal, constraints):
+                release.wait(2)
+                return []
+        run = Orchestrator(self.generator, Validator(["passed"]), self.evidence, BlockedMemory(), timeout_seconds=0.01)
+        try:
+            for _ in range(4):
+                self.assertEqual(run.run(self.goal, "fake", "abc").error, "timeout")
+            self.assertEqual(run.run(self.goal, "fake", "abc").error, "AdapterCapacityError: adapter error")
+        finally:
+            release.set()
 
     def test_illegal_transition_and_unvalidated_completion(self):
         execution = Execution("id", self.goal)

@@ -31,6 +31,10 @@ class RuntimeTests(unittest.TestCase):
         self.addCleanup(holder["server"].shutdown)
         connection = http.client.HTTPConnection(*holder["server"].server_address, timeout=2)
         self.addCleanup(connection.close)
+        connection.request("GET", "/runtime/info")
+        info_response = connection.getresponse()
+        self.assertEqual(info_response.status, 200)
+        self.assertEqual(json.loads(info_response.read()), {"mode": "demo", "generation": "placeholder", "validation": "unavailable", "evidence": "unavailable"})
         body = json.dumps({"goal": "health", "requiredChecks": ["F-01"], "workspace": "unused", "revision": "test"})
         connection.request("POST", "/executions", body)
         response = connection.getresponse()
@@ -71,6 +75,20 @@ class RuntimeTests(unittest.TestCase):
         with self.assertRaises(OSError):
             runtime.serve(Mock(), server_factory=lambda address, handler: server)
         server.server_close.assert_called_once_with()
+
+    def test_startup_errors_are_specific_and_redacted(self):
+        from src.core.openai_credentials import MissingOpenAICredentials, UnreadableOpenAICredentials
+        cases = [(ValueError("OPENAI_MODEL is required"), "OPENAI_MODEL"),
+                 (MissingOpenAICredentials("secret"), "missing"),
+                 (UnreadableOpenAICredentials("secret"), "permissions"),
+                 (OSError(98, "secret"), "already in use")]
+        for error, expected in cases:
+            with self.subTest(expected=expected):
+                stream = io.StringIO()
+                with patch.object(runtime, "create_service", side_effect=error), contextlib.redirect_stderr(stream):
+                    self.assertEqual(runtime.main(["--mode", "openai"]), 1)
+                self.assertIn(expected, stream.getvalue())
+                self.assertNotIn("secret", stream.getvalue())
 
 
 if __name__ == "__main__":

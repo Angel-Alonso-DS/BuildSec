@@ -13,6 +13,10 @@ class MissingOpenAICredentials(RuntimeError):
     """Raised without exposing a secret value."""
 
 
+class UnreadableOpenAICredentials(MissingOpenAICredentials):
+    """A configured local credentials file cannot be read."""
+
+
 def load_openai_credentials(*, project_root: Path | None = None) -> str:
     """Return an API key from the environment or the ignored secrets directory."""
     env_key = os.environ.get("OPENAI_API_KEY", "").strip()
@@ -28,8 +32,8 @@ def load_openai_credentials(*, project_root: Path | None = None) -> str:
             "Set OPENAI_API_KEY or create secrets/openai.env "
             "from secrets.example/openai.env.example"
         ) from exc
-    except OSError as exc:
-        raise MissingOpenAICredentials("Could not read local OpenAI credentials") from exc
+    except (OSError, UnicodeError) as exc:
+        raise UnreadableOpenAICredentials("Could not read local OpenAI credentials") from exc
 
     for line in contents.splitlines():
         stripped = line.strip()

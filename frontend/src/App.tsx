@@ -3,18 +3,22 @@ import { Activity, ArrowDownRight, ArrowRight, Box, Braces, Check, CheckCircle2,
 import { executionApi, terminal, type Execution, type ExecutionResults, type ExecutionState } from './api'
 import { pollExecution } from './polling'
 import { demoCode, demoExecution } from './demo'
+import { blockedMessage } from './diagnostics'
+import type { RuntimeInfo } from './api'
 
 const steps: { state: ExecutionState; label: string; caption: string; icon: typeof Layers3 }[] = [
   { state: 'PLANNING', label: 'Planificación', caption: 'Analiza la solicitud', icon: Layers3 },
-  { state: 'RISK_ASSESSMENT', label: 'Análisis de riesgos', caption: 'Identifica riesgos', icon: Shield },
-  { state: 'GENERATING', label: 'Generación', caption: 'Construye el código', icon: Braces },
-  { state: 'VALIDATING', label: 'Validación', caption: 'Ejecuta comprobaciones', icon: CheckCircle2 },
+  { state: 'RISK_ASSESSMENT', label: 'Análisis de riesgos', caption: 'Etapa del flujo', icon: Shield },
+  { state: 'GENERATING', label: 'Generación', caption: 'Solicita generación', icon: Braces },
+  { state: 'VALIDATING', label: 'Validación', caption: 'Consulta comprobaciones', icon: CheckCircle2 },
   { state: 'LEARNING', label: 'Aprendizaje', caption: 'Registra resultados', icon: Sparkles },
 ]
 const labels: Record<ExecutionState, string> = { CREATED: 'Creada', PLANNING: 'Planificando', RISK_ASSESSMENT: 'Analizando riesgos', GENERATING: 'Generando', VALIDATING: 'Validando', LEARNING: 'Aprendiendo', COMPLETED: 'Completada', FAILED: 'Fallida', BLOCKED: 'Bloqueada', CANCELLED: 'Cancelada' }
+const requestError = (error: unknown, fallback: string) => error instanceof TypeError ? 'No se pudo conectar con el backend. Comprueba que esté iniciado.' : error instanceof Error ? error.message : fallback
 
 function App() {
   const [demo, setDemo] = useState(false)
+  const [runtime, setRuntime] = useState<RuntimeInfo | null>(null)
   const [execution, setExecution] = useState<Execution | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [results, setResults] = useState<ExecutionResults | null>(null)
@@ -40,8 +44,22 @@ function App() {
 
   useEffect(() => {
     if (demo) return
+    let stopped = false
+    let timer: ReturnType<typeof setTimeout> | undefined
     const controller = new AbortController()
-    executionApi.list(controller.signal).then(items => { if (!controller.signal.aborted) { setHistory(items); setHistoryLoaded(true); setHistoryError('') } }).catch(e => { if (!controller.signal.aborted) { setHistoryLoaded(false); setHistoryError(e instanceof Error ? e.message : 'No fue posible cargar el historial.') } })
+    async function check() {
+      try { const info = await executionApi.runtime(controller.signal); if (!stopped) setRuntime(info) }
+      catch { if (!stopped) setRuntime(null) }
+      if (!stopped) timer = setTimeout(check, 5000)
+    }
+    void check()
+    return () => { stopped = true; controller.abort(); if (timer) clearTimeout(timer) }
+  }, [demo])
+
+  useEffect(() => {
+    if (demo) return
+    const controller = new AbortController()
+    executionApi.list(controller.signal).then(items => { if (!controller.signal.aborted) { setHistory(items); setHistoryLoaded(true); setHistoryError('') } }).catch(e => { if (!controller.signal.aborted) { setHistoryLoaded(false); setHistoryError(requestError(e, 'No fue posible cargar el historial.')) } })
     return () => controller.abort()
   }, [demo, historyVersion])
 
@@ -52,7 +70,7 @@ function App() {
       setExecution(snapshot); setResults(result)
       setHistory(items => items.map(item => item.id === snapshot.id ? snapshot : item))
       if (terminal.has(snapshot.state)) setHistoryVersion(version => version + 1)
-    }, e => setPollError(e instanceof Error ? e.message : 'No fue posible consultar la ejecución.'))
+    }, e => setPollError(requestError(e, 'No fue posible consultar la ejecución.')))
   }, [demo, selectedId, pollVersion])
 
   function selectExecution(id: string, snapshot?: Execution) {
@@ -70,7 +88,7 @@ function App() {
     try {
       const result = await executionApi.create({ goal: goal.trim(), requiredChecks, workspace: workspace.trim(), revision: revision.trim() })
       selectExecution(result.id, result); setHistoryVersion(version => version + 1)
-    } catch (e) { setError(e instanceof Error ? e.message : 'No fue posible crear la ejecución.') }
+    } catch (e) { setError(requestError(e, 'No fue posible crear la ejecución.')) }
     finally { setLoading(false) }
   }
 
@@ -93,13 +111,14 @@ function App() {
       </nav>
       <div className="sidebar-section mt-10">PROYECTO</div>
       <div className="project-label"><span className="project-icon"><Box size={16}/></span><span>BuildSec MVP<small>Workspace principal</small></span><ChevronDown size={15}/></div>
-      <div className="sidebar-bottom"><div className="side-note"><ShieldCheck size={19} className="text-mint"/><div><strong>Seguridad integrada</strong><p>Construye con evidencia en cada etapa.</p></div></div><div className="side-user"><span className="avatar">BS</span><div>Equipo BuildSec<small>Workspace local</small></div><ChevronDown size={15}/></div></div>
+      <div className="sidebar-bottom"><div className="side-note"><ShieldCheck size={19} className="text-mint"/><div><strong>Seguridad en desarrollo</strong><p>Validación y evidencia persistente pendientes.</p></div></div><div className="side-user"><span className="avatar">BS</span><div>Equipo BuildSec<small>Workspace local</small></div><ChevronDown size={15}/></div></div>
     </aside>
 
     <main className="main-area" id="overview">
-      <header className="topbar"><div className="breadcrumb"><span>Workspace</span><span className="slash">/</span><strong>Dashboard</strong></div><div className="flex items-center gap-3"><span className={`mode-indicator ${demo ? 'demo-indicator' : ''}`}><i/>{demo ? 'MODO DEMO' : 'API REAL'}</span><button className="mode-button" disabled={loading} onClick={toggleDemo}>{demo ? 'Salir de demo' : 'Probar demo'}</button><span className="top-avatar">BS</span></div></header>
+      <header className="topbar"><div className="breadcrumb"><span>Workspace</span><span className="slash">/</span><strong>Dashboard</strong></div><div className="flex items-center gap-3"><span className={`mode-indicator ${demo || runtime?.mode === 'demo' ? 'demo-indicator' : ''}`}><i/>{demo ? 'EJEMPLO SIMULADO' : !runtime ? 'BACKEND NO DISPONIBLE' : runtime.mode === 'demo' ? 'BACKEND DEMO' : 'BACKEND OPENAI'}</span><button className="mode-button" disabled={loading} onClick={toggleDemo}>{demo ? 'Salir de demo' : 'Probar demo'}</button><span className="top-avatar">BS</span></div></header>
       <div className="page-content">
         {demo && <div className="demo-banner"><Sparkles size={16}/> Modo demostración activo · Los datos mostrados son simulados y no representan ejecuciones reales.</div>}
+        {!demo && runtime && <div className="demo-banner">{runtime.mode === 'demo' ? 'Backend demo: generación simulada, no produce código.' : 'Backend OpenAI configurado; la disponibilidad del proveedor se comprueba al generar.'} Validación y evidencias reales no disponibles.</div>}
         <div className="page-heading"><div><div className="eyebrow"><span className="tiny-dot"/> TU ESPACIO DE CONSTRUCCIÓN</div><h1>De idea a API, <span>con confianza.</span></h1><p>Diseña, genera y valida software en un solo lugar.</p></div><div className="heading-tag"><ShieldCheck size={16}/> Seguridad desde el inicio</div></div>
 
         <div className="main-grid">
@@ -109,13 +128,14 @@ function App() {
                 <div className="form-bottom"><span><Sparkles size={14}/> Describe qué necesitas y cómo debería funcionar.</span><span>{goal.length} caracteres</span></div>
                 {!demo && <div className="advanced-fields"><label>Checks requeridos <input value={checks} onChange={e => setChecks(e.target.value)} placeholder="F-01, S-01"/></label><label>Workspace <input value={workspace} onChange={e => setWorkspace(e.target.value)} /></label><label>Revisión <input value={revision} onChange={e => setRevision(e.target.value)} /></label></div>}
                 {error && <div className="error-box" role="alert"><CircleAlert size={16}/>{error}</div>}
-                <div className="submit-row"><div className="subtle-line"><LockKeyhole size={14}/> {demo ? 'Sin conexión al backend' : 'Conectado a la API HTTP v1'}</div><button className="primary-button" disabled={loading} type="submit">{loading ? <LoaderCircle className="spin" size={17}/> : <Play size={16} fill="currentColor"/>}{loading ? 'Procesando…' : demo ? 'Ver ejecución demo' : 'Iniciar ejecución'} <ArrowRight size={16}/></button></div>
+                <div className="submit-row"><div className="subtle-line"><LockKeyhole size={14}/> {demo ? 'Ejemplo local' : runtime ? 'API HTTP disponible' : 'No se pudo comprobar la API'}</div><button className="primary-button" disabled={loading} type="submit">{loading ? <LoaderCircle className="spin" size={17}/> : <Play size={16} fill="currentColor"/>}{loading ? 'Procesando…' : demo ? 'Ver ejecución demo' : 'Iniciar ejecución'} <ArrowRight size={16}/></button></div>
               </form>
             </section>
 
             <section className="card pipeline-card" id="pipeline"><div className="card-heading"><div><div className="section-kicker">DEL REQUISITO AL RESULTADO</div><h2>Pipeline de agentes</h2><p>Una vista del recorrido de tu ejecución.</p></div><span className={`status-pill ${shown?.state === 'COMPLETED' ? 'success' : shown && terminal.has(shown.state) ? 'warning' : ''}`}><span className="pill-dot"/>{shown ? labels[shown.state] : 'En espera'}</span></div>
               <div className="pipeline">{steps.map((step, index) => { const Icon = step.icon; const visited = shown?.history.includes(step.state) ?? false; const current = shown?.state === step.state; const lastVisited = shown ? [...shown.history].reverse().find(s => steps.some(x => x.state === s)) : undefined; const stopped = !!shown && ['FAILED', 'BLOCKED', 'CANCELLED'].includes(shown.state) && lastVisited === step.state; return <div className="pipeline-step" key={step.state}><div className={`step-icon ${visited ? 'visited' : ''} ${current ? 'current' : ''} ${stopped ? 'stopped' : ''}`}><Icon size={19}/>{visited && !stopped && !current && <span className="check-mark"><Check size={10}/></span>}</div><strong>{step.label}</strong><small>{stopped ? 'Interrumpido' : current ? 'En curso' : visited ? 'Iniciado' : 'Pendiente'}</small><span className="step-caption">{step.caption}</span>{index < steps.length - 1 && <div className={`step-connector ${visited ? 'connector-active' : ''}`}/>}</div> })}</div>
               <div className="pipeline-footer"><Activity size={15}/>{shown ? `Estado reportado: ${labels[shown.state]} · Intentos: ${shown.attempts}` : 'Inicia una ejecución para ver su progreso aquí.'}<span>{shown?.state === 'COMPLETED' ? '100%' : ' '}</span></div>{!demo && pollError && <div className="error-box" role="alert"><CircleAlert size={16}/>{pollError} Consulta el ID para reintentar.</div>}
+              {!demo && shown?.state === 'BLOCKED' && <BlockedDiagnostic error={shown.error}/>}
             </section>
 
             <section className="card result-card" id="results"><div className="card-heading"><div><div className="section-kicker">TODO EN UN SOLO LUGAR</div><h2>Resultados de la ejecución</h2><p>Revisa las validaciones y los artefactos disponibles.</p></div><span className="results-icon"><Terminal size={19}/></span></div><div className="tabs" role="tablist"><button role="tab" aria-selected={tab === 'results'} onClick={() => setTab('results')}><FileCheck2 size={15}/> Validaciones</button><button role="tab" aria-selected={tab === 'code'} onClick={() => setTab('code')}><Code2 size={15}/> Código</button><button role="tab" aria-selected={tab === 'evidence'} onClick={() => setTab('evidence')}><Fingerprint size={15}/> Evidencias</button></div>
@@ -139,6 +159,7 @@ function App() {
 }
 
 function Empty({ icon: Icon, title, text }: { icon: typeof Circle; title: string; text: string }) { return <div className="empty-state"><span><Icon size={20}/></span><div><strong>{title}</strong><p>{text}</p></div></div> }
+export function BlockedDiagnostic({ error }: { error: string | null }) { return <div className="error-box" role="alert">{blockedMessage(error)}</div> }
 function Metric({ icon: Icon, label, value, tone }: { icon: typeof Circle; label: string; value: string; tone: string }) { return <div className="metric"><span className={`metric-icon ${tone}`}><Icon size={16}/></span><strong>{value}</strong><small>{label}</small></div> }
 
 export default App

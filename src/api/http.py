@@ -6,7 +6,7 @@ from urllib.parse import urlsplit
 from .service import ExecutionCapacityError
 
 
-def handler_for(service):
+def handler_for(service, runtime_info=None):
     class Handler(BaseHTTPRequestHandler):
         def respond(self, status, payload, *, location=None):
             body = json.dumps(payload).encode()
@@ -33,12 +33,16 @@ def handler_for(service):
                 return self.respond(503, {"error": "execution capacity unavailable"})
             except (ValueError, KeyError, TypeError):
                 return self.respond(400, {"error": "invalid request"})
+            except Exception:
+                return self.respond(500, {"error": "execution unavailable"})
             if async_requested:
                 return self.respond(202, result, location="/executions/" + result["id"])
             self.respond(201, result)
 
         def do_GET(self):
             path = urlsplit(self.path).path
+            if path == "/runtime/info" and runtime_info is not None:
+                return self.respond(200, runtime_info)
             if path == "/executions":
                 return self.respond(200, {"executions": service.list()})
             prefix = "/executions/"

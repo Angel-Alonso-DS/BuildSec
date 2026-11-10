@@ -86,6 +86,10 @@ class ExecutionAPITests(unittest.TestCase):
         response = connection.getresponse()
         self.assertEqual(response.status, 503)
         response.read()
+        connection.request("POST", "/executions", payload)
+        response = connection.getresponse()
+        self.assertEqual(response.status, 503)
+        response.read()
 
         generator.release.set()
         service.executor.shutdown(wait=True)
