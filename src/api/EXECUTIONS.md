@@ -7,6 +7,8 @@
 
 Las ejecuciones y resultados son volátiles y se pierden al reiniciar; el listado no es paginado ni hay cancelación de ejecución. La opción asíncrona limita el número de trabajos en ejecución y pendientes dentro de este proceso; no ofrece persistencia, ni detiene un adaptador que siga activo tras timeout. El llamador debe consultar hasta un estado terminal y administrar la vida del servicio con `close()`. Las validaciones reales y el manejo seguro de artefactos siguen pendientes de los adaptadores correspondientes.
 
+`GET /runtime/info` devuelve `mode` (`demo` u `openai`), `generation` (`placeholder` u `openai`), `validation` y `evidence` (actualmente `unavailable`). Es información pública del runtime local y no prueba que un proveedor externo esté disponible ni que sus credenciales sean válidas. El límite de admisión es compartido por POST síncronos y asíncronos. Hay como máximo cuatro llamadas de adaptador activas por orquestador, incluidas llamadas que sobrevivieron a un timeout; si se ocupan, las nuevas ejecuciones quedan bloqueadas. Esto no termina los hilos existentes y un adaptador bloqueado puede impedir la salida completa del proceso.
+
 ## Arranque local
 
 Instala las dependencias de `requirements.txt` en un entorno virtual y, desde la raíz del repositorio, ejecuta `python -m src.api.runtime`. El servidor escucha exclusivamente en `127.0.0.1:8000`. Por defecto usa `--mode demo`: generador de marcador determinista, validador que devuelve `skipped`, almacén de evidencia sin persistencia ni IDs y memoria vacía. No se ejecuta código generado y no existe un sandbox simulado.

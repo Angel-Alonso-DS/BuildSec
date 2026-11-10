@@ -1,8 +1,13 @@
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from time import monotonic
 from uuid import uuid4
+from threading import BoundedSemaphore
 
 from .models import Execution, Goal, State, checks_passed
+
+
+class AdapterCapacityError(RuntimeError):
+    """Too many adapter calls remain active, including timed-out calls."""
 
 
 class Orchestrator:
@@ -12,6 +17,7 @@ class Orchestrator:
         self.generator, self.validator = generator, validator
         self.evidence_store, self.memory_store = evidence_store, memory_store
         self.max_attempts, self.timeout_seconds = max_attempts, timeout_seconds
+        self.adapter_capacity = BoundedSemaphore(4)
 
     def run(self, goal: Goal, workspace: str, revision: str, *, execution=None, on_update=None) -> Execution:
         execution = execution if execution is not None else Execution(str(uuid4()), goal)
@@ -31,8 +37,16 @@ class Orchestrator:
             remaining = deadline - monotonic()
             if remaining <= 0:
                 raise TimeoutError()
+            if not self.adapter_capacity.acquire(blocking=False):
+                raise AdapterCapacityError("adapter capacity unavailable")
             pool = ThreadPoolExecutor(max_workers=1)
-            future = pool.submit(fn, *args)
+            try:
+                future = pool.submit(fn, *args)
+            except BaseException:
+                self.adapter_capacity.release()
+                pool.shutdown(wait=False)
+                raise
+            future.add_done_callback(lambda _: self.adapter_capacity.release())
             try:
                 return future.result(timeout=remaining)
             finally:
