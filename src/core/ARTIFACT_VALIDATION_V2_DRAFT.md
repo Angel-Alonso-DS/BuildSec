@@ -53,7 +53,12 @@ Risk { id: ID, requirement_ids: set[ID], asset: string, threat: string,
        status: string, uncertainty: string? }
 CheckDefinition { check: CheckRef, requirement_kinds: set[string],
                   requirement_tags_any: set[ID], min_risk_score: int?,
-                  finding_rule_ids_any: set[ID], mandatory: bool }
+                  finding_rule_ids_any: set[ID], mandatory: bool,
+                  trusted_config: TrustedCheckConfig }
+TrustedCheckConfig { image_digest: "sha256:"+Hash, tool: ID, tool_version: ID,
+                     executable: string, allowed_argv: list[list[string]],
+                     cwd: string, env: map[string,string], input_mode: "read-only",
+                     network: "none" }
 CheckCatalog { id: ID, version: ID, sha256: Hash, definitions: list[CheckDefinition] }
 RiskPolicy { id: ID, version: ID, sha256: Hash, low_max: 1..23,
              medium_max: 2..24, baseline_checks: set[ID], risk_rules: list[RiskRule] }
@@ -72,11 +77,46 @@ FindingProvider.inspect(ctx, artifact) -> list[Finding]
 
 Requiere `RISK_ASSESS`. Todos los inputs deben pertenecer al mismo proyecto y ser snapshots inmutables autorizados. El snapshot de requisitos contiene al menos uno, IDs únicos y lista ordenada por ID. Sus bytes canónicos son el JSON §8 de sus campos `id` y `requirements`, excluido `sha256`; sus sets se ordenan por bytes UTF-8. Política y catálogo se serializan igual excluyendo sus respectivos campos `sha256`; `baseline_checks` y los sets de cada definición se ordenan, `risk_rules` por `id` y `definitions` por `check.id`; se comprueban sus hashes antes de usarlos. El hash de requisitos es distinto del hash de política. El catálogo tiene IDs únicos; misma ID con distinta versión/configuración es `POLICY_CONFLICT`. La política exige `1 <= low_max < medium_max < 25`, al menos un baseline y que todas sus IDs existan en catálogo.
 
+`trusted_config` proviene exclusivamente del catálogo inmutable aprobado por el proyecto y autorizado por `POLICY_ADMIN`; no del artefacto, respuesta de IA, argumentos del usuario ni sandbox. `check.config_sha256 = SHA256(JSON_canónico_§8(trusted_config))`: incluye todos los campos, sin excluir ninguno. Al verificar el catálogo y antes de cada ejecución se recalcula el hash y se contrasta con el `CheckRef` seleccionado; falta, diferencia o catálogo no autorizado produce `POLICY_INVALID`/`BLOCKED`. Cualquier cambio de configuración exige nueva versión de catálogo y hash; el `CheckRef` resultante cambia. El catálogo y el hash de selección se congelan por intento como se describe abajo.
+
+`executable` es una ruta absoluta bajo `/opt/buildsec-tools/bin/`, sin componentes `.` o `..`; `allowed_argv` contiene una o más listas completas de argumentos literales, sin comodines ni interpolación, cuyo primer elemento es exactamente `executable`. Se rechazan arrays duplicados; para serializar se ordenan lexicográficamente por los bytes UTF-8 de su JSON canónico, preservando el orden dentro de cada argv. El argv solicitado debe coincidir elemento por elemento con uno de ellos. `cwd` es `/work/output`; `env` contiene exactamente las cinco variables y valores fijos de §7; `input_mode` es `read-only` y `network` es `none`. Estas restricciones no habilitan opciones adicionales: si la configuración discrepa de §7, se rechaza. La herramienta, versión e imagen aprobadas identifican el arnés confiable incluido en esa imagen, no algo proporcionado por el proyecto generado.
+
+**Vector de serialización y hash:** los siguientes bytes UTF-8 son el JSON canónico completo de un `trusted_config` de ejemplo; el digest de imagen cero es ficticio y no es una imagen autorizada:
+
+```json
+{"allowed_argv":[["/opt/buildsec-tools/bin/health","--check"]],"cwd":"/work/output","env":{"HOME":"/work/output","LANG":"C.UTF-8","LC_ALL":"C.UTF-8","PATH":"/opt/buildsec-tools/bin","TMPDIR":"/work/output/tmp"},"executable":"/opt/buildsec-tools/bin/health","image_digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","input_mode":"read-only","network":"none","tool":"health","tool_version":"1.0"}
+```
+
+Sin salto de línea final en los bytes hasheados, su `config_sha256` es `c6db14b5a947c3d0c8072d61bc591844df6529a81cd31feb95922bd166784280`; un `CheckRef` válido para esta configuración sería `{"config_sha256":"c6db14b5a947c3d0c8072d61bc591844df6529a81cd31feb95922bd166784280","id":"health","version":"1.0"}`. Cambiar cualquier byte de configuración modifica el hash y exige un `CheckRef` y catálogo nuevos. El hash no convierte la imagen de ejemplo en autorizada.
+
 El analizador B aplica exactamente las reglas del snapshot sin llamar a un modelo ni inferir controles. Para cada requisito y `RiskRule` cuyo `kind` coincida y cuyo `tag` esté ausente o figure en los tags del requisito, crea un riesgo con ID `<rule.id>.<requirement.id>`; si supera 128 caracteres o dos pares producen el mismo ID se rechaza la política. Copia `asset`, `threat`, probabilidad, impacto, tratamiento y owner de la regla; `requirement_ids` contiene solo ese requisito, `residual_risk="unassessed"`, `status="open"` y `uncertainty` se omite. Cada requisito debe coincidir con al menos una regla, de lo contrario `POLICY_INVALID`. IDs de regla y de hallazgo son únicos; riesgos se ordenan por ID. En post se parte exactamente de los riesgos pre y de las reglas/snapshots pre; cada `Finding` debe vincular el hash del artefacto actual y una combinación requisito/regla que ya coincida, y solo señala el riesgo correspondiente; no modifica puntaje ni elimina riesgo. Los hallazgos provienen del `FindingProvider` confiable inyectado por B que inspecciona datos sin ejecutar código; si un check del catálogo requiere hallazgos y el proveedor falta, falla o no puede verificar su procedencia, post falla cerrado. Si ningún check requiere hallazgos, se usa la lista vacía. Hallazgos inválidos u origen no confiable bloquean. Como MVP no interpreta contenido con IA. Para cada riesgo `score = likelihood * impact`; banda baja `1..low_max`, media `low_max+1..medium_max`, alta `medium_max+1..25`. Aceptar riesgo o tratamiento/residual corresponde a humano; no desactiva checks automáticamente. ID y fecha de evaluación no afectan el contenido determinista. Regla desconocida, motor no disponible o requisito sin regla producen `error`/`BLOCKED`.
 
 Derivación exacta: iniciar con baseline; para cada `CheckDefinition`, incluir su ID si existe un requisito cuyo `kind` pertenece a `requirement_kinds` y (`requirement_tags_any` es vacío o intersecta sus tags), y además (`min_risk_score` ausente o existe un riesgo asociado a ese requisito con score al menos ese mínimo), y además (`finding_rule_ids_any` vacío o existe un hallazgo validado de ese requisito cuyo `rule_id` está en ese set). En pre no hay hallazgos, así que las reglas que los requieren solo pueden agregar checks en post. Cada `finding_rule_ids_any` debe referenciar reglas de riesgo existentes. La unión se deduplica por ID y devuelve su `CheckRef` exacto, ordenada por ID. `mandatory` debe ser `true` para todos los checks incluidos en MVP; no hay exenciones automáticas. Post conserva riesgos pre y puede añadir checks por hallazgos, nunca retirar checks pre; reutiliza los hashes de requisitos/política/catálogo pre y añade la referencia de artefacto exacta. Si cambia un snapshot se inicia nueva evaluación pre. Un conjunto vacío o check no implementado bloquea.
 
 **Ejemplo:** baseline `health`, catálogo `auth` para kind `security`, tag `admin` y score mínimo 12; requisito `S1` security con tag admin y riesgo 3×4=12 implica checks ordenados `[auth, health]`. Con score 11, solo `[health]`; si `auth` es baseline, siempre incluye ambos. Pruebas: orden de entrada, score 1/25 y fronteras 11/12, falta de regla, ID duplicado, cambio de hash, incertidumbre, derivación post monótona y acceso cruzado.
+
+### Procedencia y congelación de la selección
+
+```text
+CheckAttribution { check: CheckRef, baseline: bool,
+                   requirement_ids: set[ID], control_refs: set[ID] }
+SelectionSnapshot { schema_version: "2.0", execution_id: UUID, attempt: uint32,
+                    artifact: ArtifactRef, post_assessment_id: UUID,
+                    requirements_sha256: Hash, policy_sha256: Hash, catalog_sha256: Hash,
+                    entries: list[CheckAttribution], sha256: Hash }
+```
+
+La evaluación post autorizada determina el conjunto de checks de §4. Para cada check seleccionado, `baseline` es verdadero si su ID figura en `RiskPolicy.baseline_checks`. `requirement_ids` es la unión de **todos** los requisitos de `RequirementsSnapshot` que satisfacen la condición completa de selección de esa `CheckDefinition` en post, incluido score y hallazgos; se evalúa también para checks seleccionados por baseline. Si un baseline no coincide con ningún requisito, ambos sets son vacíos. `control_refs` es la unión de `control_refs` de esos requisitos exclusivamente: no se inventan controles para baseline ni se incluyen controles de otros requisitos. Para un check no baseline, `requirement_ids` no puede estar vacío. Las coincidencias múltiples se deduplican por ID; sets se ordenan por bytes UTF-8, y `entries` por `check.id` UTF-8. Una referencia de requisito o control inexistente, check duplicado, versión/configuración discordante o asociación que no pueda reconstruirse desde snapshots autorizados bloquea el intento.
+
+Antes de iniciar la validación, el orquestador congela y persiste atómicamente el `SelectionSnapshot` del intento, usando el artefacto y hashes exactos de requisitos, política y catálogo de la evaluación post. Su `sha256` es SHA-256 del JSON canónico §8 de **todos** sus campos salvo `sha256`. La selección no cambia durante el intento ni al reintentar la misma operación idempotente. Cada intento de generación nuevo reconstruye y congela otra selección ligada a sus snapshots y artefacto; si cambia cualquiera de ellos, jamás reutiliza la selección o evidencia anterior. La lista `required_checks` de `ValidationRequest` debe ser exactamente la proyección `entries[].check`, en el mismo orden.
+
+**Ejemplo de procedencia:** baseline `health` sin coincidencia, y `auth` coincidente con `S1` y `S2`; snapshot de requisitos `S1.control_refs=["A.8.26","A.8.29"]` y `S2.control_refs=["A.8.29"]`. Las atribuciones son `auth → requirement_ids=["S1","S2"], control_refs=["A.8.26","A.8.29"]` y `health → requirement_ids=[], control_refs=[]`. Si `health` también coincide con `S2`, se atribuye `S2` y `A.8.29` aunque sea baseline. El constructor ordena las entradas antes de emitir snapshots: permutar el orden de entrada al constructor no cambia la selección ni su serialización. Un snapshot recibido fuera del orden canónico se rechaza.
+
+Ejemplo de un objeto `CheckAttribution` serializado canónicamente, usando el `CheckRef` del vector anterior para el baseline sin coincidencia:
+
+```json
+{"baseline":true,"check":{"config_sha256":"c6db14b5a947c3d0c8072d61bc591844df6529a81cd31feb95922bd166784280","id":"health","version":"1.0"},"control_refs":[],"requirement_ids":[]}
+```
 
 ## 5. ValidationRequest, resultados y máquina v1
 
@@ -84,15 +124,17 @@ Derivación exacta: iniciar con baseline; para cada `CheckDefinition`, incluir s
 ValidationRequest { schema_version: "2.0", id: UUID, execution_id: UUID,
                     attempt: uint32, artifact: ArtifactRef, post_assessment_id: UUID,
                     requirements_sha256: Hash, policy_sha256: Hash, catalog_sha256: Hash,
+                    selection_sha256: Hash,
                     required_checks: list[CheckRef], deadline: timestamp, idempotency_key: UUID }
 ValidationResult { schema_version: "2.0", request_id: UUID, artifact_id: UUID,
-                   artifact_sha256: Hash, check: CheckRef, requirement_ids: set[ID],
+                   artifact_sha256: Hash, selection_sha256: Hash, check: CheckRef,
+                   requirement_ids: set[ID], control_refs: set[ID],
                    status: "passed" | "failed" | "skipped" | "error",
                    reason_code: ID, evidence_ids: set[UUID] }
 ArtifactValidator.validate_artifact(ctx, request) -> list[ValidationResult]
 ```
 
-Requiere `VALIDATE`. El servidor reconstruye los checks desde evaluación post autorizada y compara exactamente request, checks, referencias y todos los hashes; no confía en listas del cliente. Devuelve exactamente un resultado por check: `passed` solo con evidencia persistida, íntegra, autenticada y ligada al mismo artefacto/check/solicitud; `failed` incumplimiento comprobado; `skipped` no ejecutado/no aplicable; `error` fallo de ejecución, aislamiento o infraestructura. Ausentes, extras, duplicados, hash/check/evidencia incorrectos invalidan el lote.
+Requiere `VALIDATE`. El servidor recupera la selección congelada por proyecto, execution e intento, comprueba su hash y reconstruye las atribuciones desde la evaluación post y snapshots autorizados; compara exactamente request, checks, referencias y todos los hashes, sin confiar en listas del cliente. Devuelve exactamente un resultado por check: `requirement_ids`, `control_refs` y `selection_sha256` deben igualar la entrada congelada; `passed` solo con evidencia persistida, íntegra, autenticada y ligada al mismo artefacto/check/solicitud; `failed` incumplimiento comprobado; `skipped` no ejecutado/no aplicable; `error` fallo de ejecución, aislamiento o infraestructura. Ausentes, extras, duplicados, atribuciones distintas o hash/check/evidencia incorrectos invalidan el lote y bloquean, incluso si el resultado declara `passed`.
 
 | Prioridad | Condición comprobada | Transición |
 |---|---|---|
@@ -140,6 +182,8 @@ Límites máximos propuestos por check: wall 30000 ms, CPU acumulada 20000 ms, m
 
 El catálogo de checks aprobado por el proyecto fija el digest de imagen, herramienta y versión, ejecutable con ruta absoluta y argv exacto; el request no puede sustituirlos. La imagen debe estar previamente disponible, verificada contra digest de una lista aprobada; no se descarga en ejecución. El proceso arranca sin shell de host ni interpolación, bajo UID no privilegiado, sin capacidades elevadas, con controles de sistema y recursos efectivos, filesystem efímero y entradas montadas solo lectura. No hay red, credenciales, socket Docker, dispositivos del host ni directorios del host, salvo el montaje de entrada verificado de §3; no hay excepción de red en MVP.
 
+Antes de `start`, el supervisor recupera por contexto autorizado el `ValidationRequest`, `SelectionSnapshot` y el catálogo congelados; verifica sus hashes, pertenencia del `CheckRef` y `SHA256` de `trusted_config` conforme a §4. Comprueba que `SandboxRequest.image_digest` coincide exactamente con esa configuración y que `argv` es uno de sus `allowed_argv`; selecciona ejecutable, `cwd` y entorno exclusivamente de la configuración, no del request ni artefacto. Verifica el digest de la imagen realmente ejecutada y que el ejecutable resuelto dentro de ella es el autorizado; el arnés montado sigue siendo el de la imagen verificada. Si cualquier comparación o garantía falla no arranca y devuelve `POLICY_INVALID` o `SANDBOX_UNAVAILABLE`, sin `passed`. El contenido generado no puede proponer, reemplazar ni modificar la configuración confiable.
+
 `cwd` del proceso es `/work/output`, directorio efímero vacío; entradas en `/work/input` de solo lectura; herramientas en `/opt/buildsec-tools` de solo lectura, con rutas absolutas. El entorno se crea desde cero: solo `PATH=/opt/buildsec-tools/bin`, `LANG=C.UTF-8`, `LC_ALL=C.UTF-8`, `HOME=/work/output`, `TMPDIR=/work/output/tmp`; sin heredar `OPENAI_*`, `PYTHONPATH`, `LD_*`, proxies ni variables del host. La configuración de herramienta proviene exclusivamente del catálogo confiable; desactivar descubrimiento de plugins/config desde artefacto y auto-descarga. Si el check necesita cargar código del artefacto, ese código se ejecuta solo dentro del sandbox y no puede modificar ni sustituir el arnés confiable; dependencias se fijan previamente en la imagen, sin instalar en runtime. Si el runtime no puede cumplir una garantía, `SANDBOX_UNAVAILABLE`/`BLOCKED`.
 
 Pruebas reales, no mocks: negar red, leer credenciales/socket, sustituir herramientas, inyectar variables/plugins, escribir entradas, agotar CPU/memoria/PIDs/disco/salida y verificar descendientes tras cancelación/timeout. Registrar runtime/kernel/configuración y resultados; una prueba en una plataforma no certifica otras. Elegir y habilitar un backend real requiere decisión humana y validación específica de plataforma.
@@ -150,7 +194,8 @@ Pruebas reales, no mocks: negar red, leer credenciales/socket, sustituir herrami
 EvidenceWriteRequest { schema_version: "2.0", execution_id: UUID,
   validation_request_id: UUID, sandbox_request_id: UUID?, artifact: ArtifactRef,
   assessment_id: UUID, requirements_sha256: Hash, policy_sha256: Hash,
-  catalog_sha256: Hash, check: CheckRef, requirement_ids: set[ID], control_refs: set[ID],
+  catalog_sha256: Hash, selection_sha256: Hash, check: CheckRef,
+  requirement_ids: set[ID], control_refs: set[ID],
   code_revision: string, tool: ID, tool_version: ID, command: list[string],
   started_at: timestamp?, finished_at: timestamp, exit_code: int32?,
   status: "passed" | "failed" | "skipped" | "error", reason_code: ID }
@@ -161,7 +206,7 @@ EvidenceStoreV2.save(ctx, write_request, redacted_log: bytes, idempotency_key: U
 EvidenceStoreV2.get(ctx, id: UUID) -> (EvidenceRecord, redacted_log: bytes)
 ```
 
-`save` requiere `EVIDENCE_WRITE`, `get` requiere `EVIDENCE_READ`. El escritor no suministra ID del registro, referencia de log ni hashes persistidos: el almacén los asigna/calcula. El supervisor verifica en transacción o contra snapshots inmutables autorizados que execution, request, assessment post, proyecto, artifact ID/hash, check/config, requisito, sandbox y status coinciden; para `passed`, existe `SandboxResult` terminal verificable y evidencia de ejecución del check sobre ese hash. Un `error` anterior al arranque omite `sandbox_request_id`, `started_at` y `exit_code`; `finished_at` es tiempo de observación. `SUCCEEDED` no sustituye la interpretación del validador. No se acepta `passed` si falta evidencia o si falla su persistencia.
+`save` requiere `EVIDENCE_WRITE`, `get` requiere `EVIDENCE_READ`. El escritor no suministra ID del registro, referencia de log ni hashes persistidos: el almacén los asigna/calcula. El supervisor verifica en transacción o contra snapshots inmutables autorizados que execution, request, assessment post, proyecto, artifact ID/hash, check/config, requisito, sandbox y status coinciden; además, `selection_sha256`, `requirement_ids` y `control_refs` de la evidencia y del resultado deben coincidir exactamente con la entrada de la selección congelada de ese check. El proceso de escritura verifica la atribución contra la selección antes de crear el resultado definitivo; no exige que el resultado ya persistido contenga el ID de evidencia que se está asignando. Después el validador incorpora ese ID y el orquestador verifica el ciclo completo antes de `passed`. Cualquier discrepancia bloquea sin aceptar evidencia como prueba válida. Para `passed`, existe `SandboxResult` terminal verificable y evidencia de ejecución del check sobre ese hash. Un `error` anterior al arranque omite `sandbox_request_id`, `started_at` y `exit_code`; `finished_at` es tiempo de observación. `SUCCEEDED` no sustituye la interpretación del validador. No se acepta `passed` si falta evidencia o si falla su persistencia.
 
 Los logs son bytes UTF-8 ya redactados por una política versionada de B antes de `save`; el proceso supervisor impide que una salida cruda se persista o registre. Si la redacción falla o no puede verificar ausencia de secreto conocido, descartar salida y devolver `EVIDENCE_ERROR`; ningún sistema genérico garantiza detectar todos los secretos, por eso no se inyectan credenciales al sandbox. El registro solo contiene argv sanitizado del catálogo; no guarda código ni secretos. `redacted_log_sha256 = SHA256(redacted_log)`; el log vacío es válido. El almacén asigna referencia opaca e ID y calcula `record_sha256` sobre JSON canónico del registro completo excluyendo solo `record_sha256`. Guarda registro y log atómicamente; `get` recalcula ambos hashes y verifica relaciones. Los hashes detectan alteraciones, no sustituyen autorización ni prueban autenticidad por sí solos.
 
@@ -192,6 +237,8 @@ Despliegue propuesto: (1) acordar y aprobar contrato; (2) A/B implementan modelo
 5. Sandbox: snapshots y terminales, límites, tiempo monotónico, carreras cancelación/finalización, fallo de terminación con cuarentena e idempotencia. Dobles verifican protocolo; aislamiento exige pruebas reales §7.
 6. Evidencia/autorización: persistencia atómica, hashes de log y registro, error sin arranque, `passed` falsificado, credenciales sintéticas en salida, aislamiento entre proyectos, revocación y caídas concurrentes en §9.
 7. La aceptación para implementación exige acuerdo A/B de este texto y vectores; la aceptación operativa exige resultados reales de pruebas de integración y aislamiento. No inferir certificación ISO.
+8. Configuración confiable: reproducir el hash del vector de §4 sin salto de línea; cambiar digest, herramienta, versión, ejecutable, argv, entorno o directorio cambia el hash; rechazar argv desconocido, env adicional, imagen sustituida y configuración inyectada por el artefacto antes de arrancar.
+9. Trazabilidad: reproducir el ejemplo de §4 con baseline sin requisito y baseline coincidente, un check seleccionado por múltiples requisitos y controles repetidos; permutar entradas al constructor de snapshots y comprobar la misma serialización. Alterar requisito, control, check/config, hash de selección o intento en `ValidationResult` o `EvidenceWriteRequest` debe bloquear; cambios de snapshots crean una selección nueva.
 
 ## 12. Matriz de observaciones y decisiones humanas
 
@@ -207,5 +254,10 @@ Despliegue propuesto: (1) acordar y aprobar contrato; (2) A/B implementan modelo
 | Resultados mixtos sin precedencia | tabla total, `error`/`skipped` antes de `failed` | 5 |
 | Herramientas y entorno no confiables | catálogo fijado, rutas, variables, cwd y prohibición de descubrimiento | 7 |
 | Dobles confundibles con aislamiento | pruebas de protocolo separadas de pruebas reales | 6, 7, 11 |
+
+| Bloqueo del Equipo B | Resolución propuesta | Verificación |
+|---|---|---|
+| Configuración confiable de checks | `TrustedCheckConfig` en `CheckDefinition`, enlazada por `CheckRef.config_sha256` al catálogo aprobado; el supervisor contrasta imagen, argv, entorno y ejecutable antes de `start` | §4, §7, vector y casos de §11.8 |
+| Trazabilidad determinista | `CheckAttribution` por check y `SelectionSnapshot` congelado por intento; resultados y evidencia coinciden exactamente con la selección y los snapshots | §4, §5, §8, ejemplos y casos de §11.9 |
 
 Estas filas describen cómo el texto aborda las observaciones; no son una aprobación del Equipo B ni una prueba de implementación. Decisiones que requieren autorización o aceptación humana: (1) acuerdo técnico A/B y aprobación del contrato antes de modificar `CONTRACTS.md`; (2) responsables del proyecto aprueban política/catálogo concretos, controles aplicables y aceptación de riesgos residuales; (3) responsables de infraestructura eligen y autorizan backend de sandbox/imagen y evalúan pruebas reales de su plataforma antes de activar la capacidad; (4) responsables de datos fijan retención y eliminación de artefactos/evidencia conforme al proyecto; (5) humano crea, revisa y fusiona el PR de contrato conforme a git-governance. Los límites numéricos del MVP propuestos en §2 y §6 entran en la revisión técnica conjunta; no representan garantías ya probadas.
