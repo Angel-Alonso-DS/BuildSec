@@ -1,5 +1,6 @@
 """HTTP transport for a caller-supplied service; it never starts a server itself."""
 import json
+import sys
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlsplit
 
@@ -8,6 +9,30 @@ from .service import ExecutionCapacityError
 
 def handler_for(service, runtime_info=None):
     class Handler(BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            # BaseHTTPRequestHandler messages may contain raw request data.
+            pass
+
+        def log_request(self, code="-", size="-"):
+            path = getattr(self, "path", "").split("?", 1)[0]
+            if path not in ("/runtime/info", "/executions"):
+                parts = path.split("/")
+                if len(parts) == 3 and parts[1] == "executions" and parts[2]:
+                    path = "/executions/{id}"
+                elif len(parts) == 4 and parts[1] == "executions" and parts[2] and parts[3] == "results":
+                    path = "/executions/{id}/results"
+                else:
+                    path = "/<unknown>"
+            method = self.command if self.command in ("GET", "POST") else "OTHER"
+            status = str(code) if str(code).isdigit() else "-"
+            sys.stderr.write(f"{self.log_date_time_string()} {method} {path} {status}\n")
+
+        def handle(self):
+            try:
+                super().handle()
+            except (ConnectionError, TimeoutError, OSError):
+                self.close_connection = True
+
         def respond(self, status, payload, *, location=None):
             body = json.dumps(payload).encode()
             self.send_response(status)
@@ -33,6 +58,8 @@ def handler_for(service, runtime_info=None):
                 return self.respond(503, {"error": "execution capacity unavailable"})
             except (ValueError, KeyError, TypeError):
                 return self.respond(400, {"error": "invalid request"})
+            except (TimeoutError, ConnectionError):
+                raise
             except Exception:
                 return self.respond(500, {"error": "execution unavailable"})
             if async_requested:

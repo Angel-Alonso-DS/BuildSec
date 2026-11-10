@@ -2,7 +2,9 @@
 import argparse
 import errno
 import signal
+import socket
 import sys
+import threading
 from http.server import ThreadingHTTPServer
 
 from src.api.http import handler_for
@@ -39,6 +41,58 @@ class EmptyMemory:
         raise RuntimeError("Memory promotion unavailable")
 
 
+class LocalHTTPServer(ThreadingHTTPServer):
+    """Bound HTTP connections independently of execution capacity."""
+    daemon_threads = True
+
+    def __init__(self, address, handler, *, max_connections=16, request_timeout=10):
+        self._admission = threading.BoundedSemaphore(max_connections)
+        self._request_timeout = request_timeout
+        self._connections = set()
+        self._connections_lock = threading.Lock()
+        super().__init__(address, handler)
+
+    @staticmethod
+    def _disconnect(request):
+        try:
+            request.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def process_request(self, request, client_address):
+        if not self._admission.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            request.settimeout(self._request_timeout)
+            with self._connections_lock:
+                self._connections.add(request)
+            super().process_request(request, client_address)
+        except BaseException:
+            with self._connections_lock:
+                self._connections.discard(request)
+            self._admission.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        timer = threading.Timer(self._request_timeout, self._disconnect, args=(request,))
+        timer.daemon = True
+        timer.start()
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            timer.cancel()
+            with self._connections_lock:
+                self._connections.discard(request)
+            self._admission.release()
+
+    def server_close(self):
+        with self._connections_lock:
+            for request in self._connections:
+                self._disconnect(request)
+        super().server_close()
+
+
 def create_service(mode):
     evidence, memory, validator = VolatileEvidence(), EmptyMemory(), UnavailableValidator()
     if mode == "demo":
@@ -49,7 +103,7 @@ def create_service(mode):
     raise ValueError("Invalid runtime mode")
 
 
-def serve(service, *, mode="demo", port=8000, server_factory=ThreadingHTTPServer):
+def serve(service, *, mode="demo", port=8000, server_factory=LocalHTTPServer):
     """Own the server; callers may inject a server factory for tests."""
     server = None
     try:
