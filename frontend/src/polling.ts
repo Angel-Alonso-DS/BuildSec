@@ -6,13 +6,18 @@ export function pollExecution(id: string, onUpdate: (execution: Execution, resul
   let timer: ReturnType<typeof setTimeout> | undefined
   async function poll() {
     try {
-      const execution = await executionApi.get(id, controller.signal)
-      if (controller.signal.aborted) return
-      const results = await executionApi.results(id, controller.signal)
-      if (controller.signal.aborted) return
-      if (execution.id !== id || results.executionId !== id) throw new Error('La API devolvió resultados de otra ejecución.')
-      onUpdate(execution, results)
-      if (!terminal.has(execution.state)) timer = setTimeout(poll, interval)
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const execution = await executionApi.get(id, controller.signal)
+        if (controller.signal.aborted) return
+        const results = await executionApi.results(id, controller.signal)
+        if (controller.signal.aborted) return
+        if (execution.id !== id || results.executionId !== id) throw new Error('La API devolvió resultados de otra ejecución.')
+        if (execution.state !== results.state) continue
+        onUpdate(execution, results)
+        if (!terminal.has(execution.state)) timer = setTimeout(poll, interval)
+        return
+      }
+      throw new Error('No fue posible obtener un estado consistente. Consulta el ID para reintentar.')
     } catch (error) {
       if (!controller.signal.aborted) onError(error)
     }

@@ -33,10 +33,15 @@ class GoalService:
 
     def create(self, payload):
         goal, workspace, revision = self._parse(payload)
-        execution = self.orchestrator.run(goal, workspace, revision)
-        with self.lock:
-            self.executions[execution.id] = self._serialize(execution)
-        return self._serialize(execution)
+        if not self.capacity.acquire(blocking=False):
+            raise ExecutionCapacityError("Execution capacity exhausted")
+        try:
+            execution = self.orchestrator.run(goal, workspace, revision)
+            with self.lock:
+                self.executions[execution.id] = self._serialize(execution)
+            return self._serialize(execution)
+        finally:
+            self.capacity.release()
 
     def create_async(self, payload):
         goal, workspace, revision = self._parse(payload)

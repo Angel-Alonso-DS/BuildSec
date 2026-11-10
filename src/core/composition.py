@@ -32,6 +32,8 @@ class AppConfig:
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None):
         values = os.environ if env is None else env
+        if not values.get("OPENAI_MODEL", "").strip():
+            raise ValueError("OPENAI_MODEL is required")
         try:
             return cls(
                 model=values.get("OPENAI_MODEL", ""),

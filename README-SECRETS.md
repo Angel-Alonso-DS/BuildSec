@@ -27,6 +27,8 @@ Use `create_openai_client()` from `src.core.openai_client` in the real Generatio
 
 `load_openai_credentials` supports CI/server injection through `OPENAI_API_KEY`, which takes precedence over the local ignored file. This lets production environments use a proper secret manager.
 
+If startup reports a missing model, set `OPENAI_MODEL` in the backend environment. Missing credentials and an unreadable local credentials file produce distinct messages. A provider authentication rejection during execution does not establish its cause; inspect the environment-variable precedence and credentials configuration without printing their values. The runtime does not verify the provider at startup.
+
 Install the official SDK from `requirements.txt` in a virtual environment. Set `OPENAI_MODEL` to the model available to your project, or pass `model=` to `OpenAIGenerator`. The adapter implements the existing `Generator` interface and returns inert source text; it does not write or execute that text, and no production sandbox or validator is supplied by this integration. Inject a fake client in unit tests.
 
 ## 4. Verification

@@ -1,7 +1,10 @@
 """Local-only entry point. No generated code is executed here."""
 import argparse
+import errno
 import signal
+import socket
 import sys
+import threading
 from http.server import ThreadingHTTPServer
 
 from src.api.http import handler_for
@@ -9,6 +12,7 @@ from src.api.service import GoalService
 from src.core.composition import AppConfig, build_goal_service
 from src.core.models import ValidationResult
 from src.core.orchestrator import Orchestrator
+from src.core.openai_credentials import MissingOpenAICredentials, UnreadableOpenAICredentials
 
 
 class DemoGenerator:
@@ -37,6 +41,58 @@ class EmptyMemory:
         raise RuntimeError("Memory promotion unavailable")
 
 
+class LocalHTTPServer(ThreadingHTTPServer):
+    """Bound HTTP connections independently of execution capacity."""
+    daemon_threads = True
+
+    def __init__(self, address, handler, *, max_connections=16, request_timeout=10):
+        self._admission = threading.BoundedSemaphore(max_connections)
+        self._request_timeout = request_timeout
+        self._connections = set()
+        self._connections_lock = threading.Lock()
+        super().__init__(address, handler)
+
+    @staticmethod
+    def _disconnect(request):
+        try:
+            request.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def process_request(self, request, client_address):
+        if not self._admission.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            request.settimeout(self._request_timeout)
+            with self._connections_lock:
+                self._connections.add(request)
+            super().process_request(request, client_address)
+        except BaseException:
+            with self._connections_lock:
+                self._connections.discard(request)
+            self._admission.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        timer = threading.Timer(self._request_timeout, self._disconnect, args=(request,))
+        timer.daemon = True
+        timer.start()
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            timer.cancel()
+            with self._connections_lock:
+                self._connections.discard(request)
+            self._admission.release()
+
+    def server_close(self):
+        with self._connections_lock:
+            for request in self._connections:
+                self._disconnect(request)
+        super().server_close()
+
+
 def create_service(mode):
     evidence, memory, validator = VolatileEvidence(), EmptyMemory(), UnavailableValidator()
     if mode == "demo":
@@ -47,11 +103,14 @@ def create_service(mode):
     raise ValueError("Invalid runtime mode")
 
 
-def serve(service, *, server_factory=ThreadingHTTPServer):
+def serve(service, *, mode="demo", port=8000, server_factory=LocalHTTPServer):
     """Own the server; callers may inject a server factory for tests."""
     server = None
     try:
-        server = server_factory(("127.0.0.1", 8000), handler_for(service))
+        info = {"mode": mode, "generation": "placeholder" if mode == "demo" else "openai",
+                "validation": "unavailable", "evidence": "unavailable"}
+        server = server_factory(("127.0.0.1", port), handler_for(service, info))
+        print(f"BuildSec local API listening on 127.0.0.1:{port} (mode: {mode})", flush=True)
         server.serve_forever()
     finally:
         if server is not None:
@@ -61,6 +120,7 @@ def serve(service, *, server_factory=ThreadingHTTPServer):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Run the BuildSec local API")
     parser.add_argument("--mode", choices=("demo", "openai"), default="demo")
+    parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args(argv)
     previous = signal.getsignal(signal.SIGTERM)
     service = None
@@ -72,10 +132,22 @@ def main(argv=None):
     try:
         signal.signal(signal.SIGTERM, terminate)
         service = create_service(args.mode)
-        print(f"Starting BuildSec local API: 127.0.0.1:8000 (mode: {args.mode})", flush=True)
-        serve(service)
+        serve(service, mode=args.mode, port=args.port)
     except KeyboardInterrupt:
         pass
+    except UnreadableOpenAICredentials:
+        print("Cannot read local OpenAI credentials; check file permissions.", file=sys.stderr)
+        exit_code = 1
+    except MissingOpenAICredentials:
+        print("OpenAI credentials are missing; see README-SECRETS.md.", file=sys.stderr)
+        exit_code = 1
+    except ValueError as exc:
+        message = "OPENAI_MODEL is not configured." if str(exc) == "OPENAI_MODEL is required" else "Invalid runtime configuration."
+        print(message, file=sys.stderr)
+        exit_code = 1
+    except OSError as exc:
+        print(f"Port {args.port} is already in use." if exc.errno == errno.EADDRINUSE else "Could not start the local API.", file=sys.stderr)
+        exit_code = 1
     except Exception:
         # Never print provider exception details, credentials or configuration values.
         print("Could not start or run the local API; check configuration and port availability.", file=sys.stderr)
