@@ -1,6 +1,7 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { Activity, ArrowDownRight, ArrowRight, Box, Braces, Check, CheckCircle2, ChevronDown, Circle, CircleAlert, Clock3, Code2, ExternalLink, FileCheck2, FileText, Fingerprint, Layers3, LayoutDashboard, LoaderCircle, LockKeyhole, Play, RefreshCw, Shield, ShieldCheck, Sparkles, Terminal, Workflow } from 'lucide-react'
-import { executionApi, type Execution, type ExecutionState } from './api'
+import { executionApi, terminal, type Execution, type ExecutionResults, type ExecutionState } from './api'
+import { pollExecution } from './polling'
 import { demoCode, demoExecution } from './demo'
 
 const steps: { state: ExecutionState; label: string; caption: string; icon: typeof Layers3 }[] = [
@@ -11,11 +12,16 @@ const steps: { state: ExecutionState; label: string; caption: string; icon: type
   { state: 'LEARNING', label: 'Aprendizaje', caption: 'Registra resultados', icon: Sparkles },
 ]
 const labels: Record<ExecutionState, string> = { CREATED: 'Creada', PLANNING: 'Planificando', RISK_ASSESSMENT: 'Analizando riesgos', GENERATING: 'Generando', VALIDATING: 'Validando', LEARNING: 'Aprendiendo', COMPLETED: 'Completada', FAILED: 'Fallida', BLOCKED: 'Bloqueada', CANCELLED: 'Cancelada' }
-const terminal = new Set<ExecutionState>(['COMPLETED', 'FAILED', 'BLOCKED', 'CANCELLED'])
 
 function App() {
   const [demo, setDemo] = useState(false)
   const [execution, setExecution] = useState<Execution | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [results, setResults] = useState<ExecutionResults | null>(null)
+  const [history, setHistory] = useState<Execution[]>([])
+  const [historyLoaded, setHistoryLoaded] = useState(false)
+  const [historyVersion, setHistoryVersion] = useState(0)
+  const [pollVersion, setPollVersion] = useState(0)
   const [demoVisible, setDemoVisible] = useState(false)
   const [goal, setGoal] = useState('')
   const [checks, setChecks] = useState('F-01, S-01')
@@ -24,9 +30,35 @@ function App() {
   const [lookup, setLookup] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [historyError, setHistoryError] = useState('')
+  const [pollError, setPollError] = useState('')
   const [tab, setTab] = useState<'results' | 'code' | 'evidence'>('results')
   const shown = demo ? (demoVisible ? demoExecution : null) : execution
-  const passed = shown?.validation.filter(item => item.status === 'passed').length ?? 0
+  const validation = demo ? (shown?.validation ?? []) : (results?.validation ?? [])
+  const evidence = demo ? validation.filter(v => v.evidence_id).map(v => ({ id: v.evidence_id! })) : (results?.evidence ?? [])
+  const passed = validation.filter(item => item.status === 'passed').length
+
+  useEffect(() => {
+    if (demo) return
+    const controller = new AbortController()
+    executionApi.list(controller.signal).then(items => { if (!controller.signal.aborted) { setHistory(items); setHistoryLoaded(true); setHistoryError('') } }).catch(e => { if (!controller.signal.aborted) { setHistoryLoaded(false); setHistoryError(e instanceof Error ? e.message : 'No fue posible cargar el historial.') } })
+    return () => controller.abort()
+  }, [demo, historyVersion])
+
+  useEffect(() => {
+    if (demo || !selectedId) return
+    setPollError('')
+    return pollExecution(selectedId, (snapshot, result) => {
+      setExecution(snapshot); setResults(result)
+      setHistory(items => items.map(item => item.id === snapshot.id ? snapshot : item))
+      if (terminal.has(snapshot.state)) setHistoryVersion(version => version + 1)
+    }, e => setPollError(e instanceof Error ? e.message : 'No fue posible consultar la ejecución.'))
+  }, [demo, selectedId, pollVersion])
+
+  function selectExecution(id: string, snapshot?: Execution) {
+    setExecution(snapshot ?? null); setResults(null); setSelectedId(id); setLookup(id); setPollError('')
+    if (id === selectedId) setPollVersion(version => version + 1)
+  }
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -37,17 +69,14 @@ function App() {
     setLoading(true)
     try {
       const result = await executionApi.create({ goal: goal.trim(), requiredChecks, workspace: workspace.trim(), revision: revision.trim() })
-      setExecution(result); setLookup(result.id)
+      selectExecution(result.id, result); setHistoryVersion(version => version + 1)
     } catch (e) { setError(e instanceof Error ? e.message : 'No fue posible crear la ejecución.') }
     finally { setLoading(false) }
   }
 
-  async function refresh() {
+  function refresh() {
     if (demo || !lookup.trim()) return
-    setLoading(true); setError('')
-    try { setExecution(await executionApi.get(lookup.trim())) }
-    catch (e) { setError(e instanceof Error ? e.message : 'No fue posible consultar la ejecución.') }
-    finally { setLoading(false) }
+    setError(''); selectExecution(lookup.trim())
   }
 
   function toggleDemo() { setDemo(!demo); setError(''); setTab('results'); if (!demo) setDemoVisible(true) }
@@ -68,7 +97,7 @@ function App() {
     </aside>
 
     <main className="main-area" id="overview">
-      <header className="topbar"><div className="breadcrumb"><span>Workspace</span><span className="slash">/</span><strong>Dashboard</strong></div><div className="flex items-center gap-3"><span className={`mode-indicator ${demo ? 'demo-indicator' : ''}`}><i/>{demo ? 'MODO DEMO' : 'API REAL'}</span><button className="mode-button" onClick={toggleDemo}>{demo ? 'Salir de demo' : 'Probar demo'}</button><span className="top-avatar">BS</span></div></header>
+      <header className="topbar"><div className="breadcrumb"><span>Workspace</span><span className="slash">/</span><strong>Dashboard</strong></div><div className="flex items-center gap-3"><span className={`mode-indicator ${demo ? 'demo-indicator' : ''}`}><i/>{demo ? 'MODO DEMO' : 'API REAL'}</span><button className="mode-button" disabled={loading} onClick={toggleDemo}>{demo ? 'Salir de demo' : 'Probar demo'}</button><span className="top-avatar">BS</span></div></header>
       <div className="page-content">
         {demo && <div className="demo-banner"><Sparkles size={16}/> Modo demostración activo · Los datos mostrados son simulados y no representan ejecuciones reales.</div>}
         <div className="page-heading"><div><div className="eyebrow"><span className="tiny-dot"/> TU ESPACIO DE CONSTRUCCIÓN</div><h1>De idea a API, <span>con confianza.</span></h1><p>Diseña, genera y valida software en un solo lugar.</p></div><div className="heading-tag"><ShieldCheck size={16}/> Seguridad desde el inicio</div></div>
@@ -86,19 +115,19 @@ function App() {
 
             <section className="card pipeline-card" id="pipeline"><div className="card-heading"><div><div className="section-kicker">DEL REQUISITO AL RESULTADO</div><h2>Pipeline de agentes</h2><p>Una vista del recorrido de tu ejecución.</p></div><span className={`status-pill ${shown?.state === 'COMPLETED' ? 'success' : shown && terminal.has(shown.state) ? 'warning' : ''}`}><span className="pill-dot"/>{shown ? labels[shown.state] : 'En espera'}</span></div>
               <div className="pipeline">{steps.map((step, index) => { const Icon = step.icon; const visited = shown?.history.includes(step.state) ?? false; const current = shown?.state === step.state; const lastVisited = shown ? [...shown.history].reverse().find(s => steps.some(x => x.state === s)) : undefined; const stopped = !!shown && ['FAILED', 'BLOCKED', 'CANCELLED'].includes(shown.state) && lastVisited === step.state; return <div className="pipeline-step" key={step.state}><div className={`step-icon ${visited ? 'visited' : ''} ${current ? 'current' : ''} ${stopped ? 'stopped' : ''}`}><Icon size={19}/>{visited && !stopped && !current && <span className="check-mark"><Check size={10}/></span>}</div><strong>{step.label}</strong><small>{stopped ? 'Interrumpido' : current ? 'En curso' : visited ? 'Iniciado' : 'Pendiente'}</small><span className="step-caption">{step.caption}</span>{index < steps.length - 1 && <div className={`step-connector ${visited ? 'connector-active' : ''}`}/>}</div> })}</div>
-              <div className="pipeline-footer"><Activity size={15}/>{shown ? `Estado reportado: ${labels[shown.state]} · Intentos: ${shown.attempts}` : 'Inicia una ejecución para ver su progreso aquí.'}<span>{shown?.state === 'COMPLETED' ? '100%' : ' '}</span></div>
+              <div className="pipeline-footer"><Activity size={15}/>{shown ? `Estado reportado: ${labels[shown.state]} · Intentos: ${shown.attempts}` : 'Inicia una ejecución para ver su progreso aquí.'}<span>{shown?.state === 'COMPLETED' ? '100%' : ' '}</span></div>{!demo && pollError && <div className="error-box" role="alert"><CircleAlert size={16}/>{pollError} Consulta el ID para reintentar.</div>}
             </section>
 
             <section className="card result-card" id="results"><div className="card-heading"><div><div className="section-kicker">TODO EN UN SOLO LUGAR</div><h2>Resultados de la ejecución</h2><p>Revisa las validaciones y los artefactos disponibles.</p></div><span className="results-icon"><Terminal size={19}/></span></div><div className="tabs" role="tablist"><button role="tab" aria-selected={tab === 'results'} onClick={() => setTab('results')}><FileCheck2 size={15}/> Validaciones</button><button role="tab" aria-selected={tab === 'code'} onClick={() => setTab('code')}><Code2 size={15}/> Código</button><button role="tab" aria-selected={tab === 'evidence'} onClick={() => setTab('evidence')}><Fingerprint size={15}/> Evidencias</button></div>
-              {tab === 'results' && (shown?.validation.length ? <div className="result-list">{shown.validation.map((v, i) => <div className="result-item" key={`${v.requirement_id}-${i}`}><span className={`result-icon ${v.status}`} >{v.status === 'passed' ? <Check size={17}/> : <CircleAlert size={17}/>}</span><div><strong>{v.requirement_id}</strong><small>{v.tool || 'Herramienta no indicada'} {v.exit_code !== null ? `· salida ${v.exit_code}` : ''}</small></div><span className={`result-status ${v.status}`}>{v.status}</span></div>)}</div> : <Empty icon={FileCheck2} title="Aún no hay resultados" text="Las validaciones aparecerán aquí cuando estén disponibles."/>)}
+              {tab === 'results' && (validation.length ? <div className="result-list">{validation.map((v, i) => <div className="result-item" key={`${v.requirement_id}-${i}`}><span className={`result-icon ${v.status}`} >{v.status === 'passed' ? <Check size={17}/> : <CircleAlert size={17}/>}</span><div><strong>{v.requirement_id}</strong><small>{v.tool || 'Herramienta no indicada'} {v.exit_code !== null ? `· salida ${v.exit_code}` : ''}</small></div><span className={`result-status ${v.status}`}>{v.status}</span></div>)}</div> : <Empty icon={FileCheck2} title="Aún no hay resultados" text="Las validaciones aparecerán aquí cuando estén disponibles."/>)}
               {tab === 'code' && (demo && shown ? <div className="code-block"><div><span>main.py</span><span>SOLO LECTURA · DEMO</span></div><pre>{demoCode}</pre></div> : <Empty icon={Code2} title="Código no disponible" text="La API actual no proporciona un endpoint para consultar el código generado."/>)}
-              {tab === 'evidence' && (shown?.validation.some(v => v.evidence_id) ? <div className="result-list">{shown.validation.filter(v => v.evidence_id).map((v, i) => <div className="result-item" key={`${v.evidence_id}-${i}`}><span className="result-icon passed"><Fingerprint size={17}/></span><div><strong>{v.evidence_id}</strong><small>{v.requirement_id} · Referencia de evidencia{demo ? ' simulada' : ''}</small></div><span className="muted-label">Solo referencia</span></div>)}</div> : <Empty icon={Fingerprint} title="Sin evidencias disponibles" text="La API actual solo devuelve referencias cuando están disponibles."/>)}
+              {tab === 'evidence' && (evidence.length ? <div className="result-list">{evidence.map((item, i) => <div className="result-item" key={`${item.id}-${i}`}><span className="result-icon"><Fingerprint size={17}/></span><div><strong>{item.id}</strong><small>Referencia de evidencia{demo ? ' simulada' : ''}</small></div><span className="muted-label">Solo referencia</span></div>)}</div> : <Empty icon={Fingerprint} title="Sin evidencias disponibles" text="La API actual solo devuelve referencias cuando están disponibles."/>)}
             </section>
           </div>
 
-          <div className="right-column"><section className="card summary-card"><div className="card-heading compact"><div><div className="section-kicker">DE UN VISTAZO</div><h2>Resumen</h2></div><span className="outline-icon"><Activity size={17}/></span></div><p className="summary-caption">{demo ? 'Datos de demostración' : 'Ejecución seleccionada'}</p><div className="summary-grid"><Metric icon={Layers3} label="Ejecución" value={shown ? '01' : '—'} tone="green"/><Metric icon={CheckCircle2} label="Checks aprobados" value={shown ? String(passed).padStart(2, '0') : '—'} tone="blue"/><Metric icon={ShieldCheck} label="Estado" value={shown ? labels[shown.state] : 'Sin datos'} tone="purple"/><Metric icon={FileText} label="Evidencias" value={shown ? String(shown.validation.filter(v => v.evidence_id).length).padStart(2, '0') : '—'} tone="orange"/></div><div className="summary-foot"><span><i/> {demo ? 'Información simulada' : 'Información de esta sesión'}</span><ArrowDownRight size={15}/></div></section>
-            <section className="card history-card" id="history"><div className="card-heading compact"><div><div className="section-kicker">CONTINÚA DONDE LO DEJASTE</div><h2>Actividad reciente</h2></div><Clock3 size={18} className="text-slate"/></div><p className="summary-caption">{demo ? 'Ejemplo de actividad' : 'Ejecución seleccionada en esta sesión'}</p>{shown ? <div className="history-entry"><div className="history-icon"><Code2 size={17}/></div><div className="history-copy"><strong>{shown.goal.description}</strong><small>{shown.id}</small><span className={`status-pill ${shown.state === 'COMPLETED' ? 'success' : 'warning'}`}><span className="pill-dot"/>{labels[shown.state]}</span></div></div> : <div className="history-empty"><Clock3 size={20}/><strong>Sin actividad todavía</strong><span>Tu ejecución aparecerá aquí.</span></div>}
-              {!demo && <div className="lookup"><label htmlFor="lookup">Consultar por ID</label><div><input id="lookup" value={lookup} onChange={e => setLookup(e.target.value)} placeholder="ID de ejecución"/><button onClick={refresh} disabled={loading || !lookup.trim()} aria-label="Consultar ejecución"><RefreshCw size={16}/></button></div><small>El backend no ofrece un listado histórico.</small></div>}
+          <div className="right-column"><section className="card summary-card"><div className="card-heading compact"><div><div className="section-kicker">DE UN VISTAZO</div><h2>Resumen</h2></div><span className="outline-icon"><Activity size={17}/></span></div><p className="summary-caption">{demo ? 'Datos de demostración' : 'Ejecución seleccionada'}</p><div className="summary-grid"><Metric icon={Layers3} label="Ejecuciones" value={demo ? (shown ? '01' : '00') : historyLoaded ? String(history.length).padStart(2, '0') : '—'} tone="green"/><Metric icon={CheckCircle2} label="Checks aprobados" value={shown && (demo || results) ? String(passed).padStart(2, '0') : '—'} tone="blue"/><Metric icon={ShieldCheck} label="Estado" value={shown ? labels[shown.state] : 'Sin datos'} tone="purple"/><Metric icon={FileText} label="Referencias" value={shown && (demo || results) ? String(evidence.length).padStart(2, '0') : '—'} tone="orange"/></div><div className="summary-foot"><span><i/> {demo ? 'Información simulada' : 'Datos volátiles en memoria'}</span><ArrowDownRight size={15}/></div></section>
+            <section className="card history-card" id="history"><div className="card-heading compact"><div><div className="section-kicker">CONTINÚA DONDE LO DEJASTE</div><h2>Actividad reciente</h2></div><Clock3 size={18} className="text-slate"/></div><p className="summary-caption">{demo ? 'Ejemplo de actividad' : 'Historial en memoria · se pierde al reiniciar'}</p>{!demo && historyError && <div className="error-box" role="alert">{historyError}</div>}{(demo ? (shown ? [shown] : []) : [...history].reverse()).map(item => <button type="button" className="history-entry history-select" key={item.id} onClick={() => { if (!demo) selectExecution(item.id, item) }}><div className="history-icon"><Code2 size={17}/></div><div className="history-copy"><strong>{item.goal.description}</strong><small>{item.id}</small><span className={`status-pill ${item.state === 'COMPLETED' ? 'success' : terminal.has(item.state) ? 'warning' : ''}`}><span className="pill-dot"/>{labels[item.state]}</span></div></button>)}{!demo && !historyLoaded && !historyError && <p className="summary-caption">Cargando historial…</p>}{!(demo ? shown : history.length) && (demo || historyLoaded) && !historyError && <div className="history-empty"><Clock3 size={20}/><strong>Sin actividad todavía</strong><span>Tu ejecución aparecerá aquí.</span></div>}
+              {!demo && <div className="lookup"><label htmlFor="lookup">Consultar por ID</label><div><input id="lookup" value={lookup} onChange={e => setLookup(e.target.value)} placeholder="ID de ejecución"/><button onClick={refresh} disabled={loading || !lookup.trim()} aria-label="Consultar ejecución"><RefreshCw size={16}/></button></div><small>Selecciona una ejecución o consulta por ID.</small><button type="button" className="history-refresh" onClick={() => setHistoryVersion(version => version + 1)}>Actualizar historial</button></div>}
             </section>
             <section className="trust-card"><div className="trust-top"><div className="trust-icon"><ShieldCheck size={20}/></div><ExternalLink size={15}/></div><h3>Construye con seguridad</h3><p>La seguridad forma parte del proceso, desde los requisitos hasta la validación.</p><div><span>BUILT FOR TRUST</span><ArrowRight size={16}/></div></section>
           </div>
