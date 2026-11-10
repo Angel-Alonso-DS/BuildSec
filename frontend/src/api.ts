@@ -4,6 +4,7 @@ export interface ValidationResult { requirement_id: string; status: CheckStatus;
 export interface Execution { id: string; goal: { description: string; required_checks: string[] }; state: ExecutionState; attempts: number; validation: ValidationResult[]; history: ExecutionState[]; error: string | null }
 export interface ExecutionResults { executionId: string; state: ExecutionState; validation: ValidationResult[]; artifacts: unknown[]; evidence: { id: string }[] }
 export interface CreateExecution { goal: string; requiredChecks: string[]; workspace: string; revision: string }
+export interface RuntimeInfo { mode: 'demo' | 'openai'; generation: 'placeholder' | 'openai'; validation: string; evidence: string }
 export const terminal = new Set<ExecutionState>(['COMPLETED', 'FAILED', 'BLOCKED', 'CANCELLED'])
 
 export class ApiError extends Error {
@@ -18,6 +19,11 @@ async function json<T>(response: Response): Promise<T> {
 const pathFor = (id: string) => `/executions/${encodeURIComponent(id)}`
 
 export const executionApi = {
+  runtime: async (signal?: AbortSignal) => {
+    const info = await json<RuntimeInfo>(await fetch('/runtime/info', { signal }))
+    if (!((info.mode === 'demo' && info.generation === 'placeholder') || (info.mode === 'openai' && info.generation === 'openai'))) throw new Error('Información del backend no reconocida.')
+    return info
+  },
   async create(input: CreateExecution, signal?: AbortSignal): Promise<Execution> {
     const response = await fetch('/executions', { method: 'POST', headers: { 'Content-Type': 'application/json', Prefer: 'respond-async' }, body: JSON.stringify(input), signal })
     if (!response.ok) throw new ApiError(response.status)
