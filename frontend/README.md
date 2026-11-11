@@ -1,4 +1,4 @@
-# BuildSec dashboard
+# Dashboard de BuildSys (repositorio BuildSec)
 
 Interfaz independiente para la API HTTP v1 del monolito. No ejecuta el código generado ni implementa un sandbox.
 
@@ -12,7 +12,7 @@ El servidor de desarrollo de Vite reenvía `/executions` y `/runtime` a `http://
 
 El formulario envía `goal`, `requiredChecks`, `workspace` y `revision` a `POST /executions` con `Prefer: respond-async`. Ante `202` se comprueba `Location` y se consulta la ejecución y sus resultados cada dos segundos, sin peticiones superpuestas. El polling se detiene al alcanzar un estado terminal, al cambiar de ejecución, al entrar en modo demo o al abandonar la vista; detenerlo no cancela la ejecución del servidor. Si falla una consulta, se puede reintentar buscando el ID.
 
-El historial procede de `GET /executions` y es volátil: se pierde al reiniciar el proceso del backend. `GET /executions/{id}/results` proporciona los estados de validación y referencias de evidencia; estas referencias no acreditan que exista un archivo verificado. Un `skipped` nunca cuenta como aprobado. La API no ofrece recuperación del código generado ni contenido de evidencias. El modo demo está identificado y no realiza solicitudes a la API.
+El historial procede de `GET /executions` y es volátil: se pierde al reiniciar el proceso del backend. `GET /executions/{id}/results` proporciona los estados de validación y referencias de evidencia; estas referencias no acreditan que exista un archivo verificado. Un `skipped` nunca cuenta como aprobado. La API no ofrece recuperación del código generado ni contenido de evidencias. El ejemplo local activado con «Probar demo» está identificado y no consulta la API; es distinto de una ejecución enviada a un backend en modo demo.
 
 Comprobaciones: `npm run lint`, `npm run build` y `npm test`.
 
